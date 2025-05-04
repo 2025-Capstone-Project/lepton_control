@@ -2,7 +2,7 @@ import os
 import re
 import glob
 import argparse
-
+import cv2
 
 def extract_max_value(filename):
     """파일 이름에서 max_ 다음에 오는 숫자 값을 추출합니다."""
@@ -17,7 +17,20 @@ def create_yolo_label(output_path, class_id, bbox):
         x_center, y_center, width, height = bbox
         f.write(f"{class_id} {x_center} {y_center} {width} {height}\n")
 
+def get_temp_from_bgr(bgr):
+    i = lut_map.get(tuple(int(v) for v in bgr), None)
+    if i is not None:
+        return i / 255.0 * (60 - 10) + 10
+    else:
+        return None  # LUT에 없으면 None 반환
+        
 def auto_labeling(image_dir, output_dir, threshold, bbox, class_id=0, class_name='A'):
+    # JET 컬러맵 LUT 생성
+    gray = np.arange(256, dtype=np.uint8)
+    jet_lut = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
+    lut_map = {tuple(jet_lut[i,0]): i for i in range(256)}
+
+    
     """이미지 파일을 자동으로 라벨링합니다."""
     # 출력 디렉토리가 없으면 생성
     os.makedirs(output_dir, exist_ok=True)
@@ -34,7 +47,16 @@ def auto_labeling(image_dir, output_dir, threshold, bbox, class_id=0, class_name
     
     for image_path in image_files:
         filename = os.path.basename(image_path)
-        max_value = extract_max_value(filename)
+        #max_value = extract_max_value(filename)
+        
+        #opencv로 이미지 로드 후 최고 온도 추출
+        image = cv2.imread(image_path)
+        hsv_image = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        v_channel = hsv_image[:,:,2]
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(v_channel)
+        x, y = min_loc
+        bgr = img[y, x]
+        max_value = get_temp_from_bgr(bgr)
         
         if max_value is not None:
             # 라벨 파일 경로 생성 (이미지와 같은 이름, 확장자만 .txt로)
@@ -62,7 +84,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--image_dir', type=str, help='이미지가 있는 디렉토리 경로')
     parser.add_argument('--output_dir', type=str, help='라벨 파일을 저장할 디렉토리 경로')
-    parser.add_argument('--threshold', type=float, help='max_ 값의 임계값')
+    parser.add_argument('--threshold', type=float, help='온도값 판별 임계값')
     parser.add_argument('--class_id', type=int, default=0, help='클래스 ID (기본값: 0)')
     parser.add_argument('--class_name', type=str, default='A', help='클래스 이름 (기본값: A)')
     parser.add_argument('--x_center', type=float, default=0.5, help='바운딩 박스 중심 x 좌표 (0~1)')
