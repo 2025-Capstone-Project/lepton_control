@@ -3,6 +3,11 @@ import re
 import glob
 import argparse
 import cv2
+from multiprocessing import Process, Manager
+import numpy as np
+import time
+
+num_cores = os.cpu_count()
 
 def extract_max_value(filename):
     """파일 이름에서 max_ 다음에 오는 숫자 값을 추출합니다."""
@@ -17,7 +22,7 @@ def create_yolo_label(output_path, class_id, bbox):
         x_center, y_center, width, height = bbox
         f.write(f"{class_id} {x_center} {y_center} {width} {height}\n")
 
-def get_temp_from_bgr(bgr):
+def get_temp_from_bgr(bgr, lut_map):
     i = lut_map.get(tuple(int(v) for v in bgr), None)
     if i is not None:
         return i / 255.0 * (60 - 10) + 10
@@ -26,6 +31,7 @@ def get_temp_from_bgr(bgr):
         
 def auto_labeling(image_dir, output_dir, threshold, bbox, class_id=0, class_name='A'):
     # JET 컬러맵 LUT 생성
+    global num_cores
     gray = np.arange(256, dtype=np.uint8)
     jet_lut = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
     lut_map = {tuple(jet_lut[i,0]): i for i in range(256)}
@@ -41,40 +47,76 @@ def auto_labeling(image_dir, output_dir, threshold, bbox, class_id=0, class_name
     for ext in image_extensions:
         image_files.extend(glob.glob(os.path.join(image_dir, ext)))
     
+    len_images = len(image_files)
+    
     abnormal_count = 0
     normal_count = 0
     
+    image_files = np.array(image_files)
+    chunks_of_arrays = np.array_split(image_files, num_cores)
+    image_files = [chunk.tolist() for chunk in chunks_of_arrays]
     
+    
+    #라벨링 결과를 저장하는 리스트를 스레드 끼리 공유하는 전용 리스트로 생성
+    manager = Manager()
+    return_values = manager.list()
+    
+    #프로세스 생성
+    processes = [Process(target=process_labeling, args=(image_file, threshold, return_values, lut_map, output_dir, bbox)) for image_file in image_files]
+    
+    for process in processes:
+        process.start()
+        
+    for process in processes:
+        process.join()
+    
+
+
+    for return_value in return_values:
+        abnormal_count += return_value[0]
+        normal_count += return_value[1]
+       
+    print(f"라벨링 완료: 총 {len_images}개 이미지 중 {abnormal_count}개가 '비정상' 클래스로, {normal_count}개가 '정상' 클래스로 라벨링되었습니다.")
+    return len(image_files)
+
+def process_labeling(image_files, threshold, return_values, lut_map, output_dir, bbox):
+    abnormal_count = 0
+    normal_count = 0
+    
+    if len(image_files) == 0:
+        return_values.append([abnormal_count, normal_count])
+        return
+        
     for image_path in image_files:
+        
         filename = os.path.basename(image_path)
         #max_value = extract_max_value(filename)
         
         #opencv로 이미지 로드 후 최고 온도 추출
         image = cv2.imread(image_path)
-        hsv_image = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        v_channel = hsv_image[:,:,2]
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(v_channel)
-        x, y = min_loc
-        bgr = img[y, x]
-        max_value = get_temp_from_bgr(bgr)
+        height, width, channels = image.shape
+        img_value = np.zeros((height, width))
+        for y in range(height):
+            for x in range(width): 
+                bgr = image[y, x]
+                img_value[y, x] = get_temp_from_bgr(bgr, lut_map)
+        max_temp = np.max(img_value)
         
-        if max_value is not None:
+        if max_temp is not None:
             # 라벨 파일 경로 생성 (이미지와 같은 이름, 확장자만 .txt로)
             label_filename = os.path.splitext(filename)[0] + '.txt'
             label_path = os.path.join(output_dir, label_filename)
             
             # 임계값 이상이면 지정된 클래스로 라벨링
-            if max_value >= threshold:
+            if max_temp >= threshold:
                 create_yolo_label(label_path, 0, bbox)
                 abnormal_count += 1
                 
             else:
                 create_yolo_label(label_path, 1, bbox)
-                normal_count +=1    
+                normal_count +=1
     
-    print(f"라벨링 완료: 총 {len(image_files)}개 이미지 중 {abnormal_count}개가 '비정상' 클래스로, {normal_count}개가 '정상' 클래스로 라벨링되었습니다.")
-    return len(image_files)
-
+    return_values.append([abnormal_count, normal_count])
 
 
 # 메인 실행 부분
@@ -95,7 +137,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
 
-
+    start = time.time()
     bbox = (args.x_center, args.y_center, args.width, args.height)
     auto_labeling(args.image_dir, args.output_dir, args.threshold, bbox, args.class_id, args.class_name)
+    end = time.time()
+    print(f"{end - start:.5f} sec")
 
